@@ -18,9 +18,15 @@
 // the whole system's audio.
 const std = @import("std");
 
+// Deliberately narrow includes: Zig 0.16's @cImport cannot digest either
+// <CoreAudio/CoreAudio.h> (Clang blocks) or the CoreFoundation umbrella
+// header (packed Mach structs). macos_tap_shim.h stands in for the former;
+// the individual CF headers below are what this file actually touches.
 const c = @cImport({
-    @cInclude("CoreAudio/CoreAudio.h");
-    @cInclude("CoreFoundation/CoreFoundation.h");
+    @cInclude("CoreFoundation/CFString.h");
+    @cInclude("CoreFoundation/CFArray.h");
+    @cInclude("CoreFoundation/CFDictionary.h");
+    @cInclude("CoreFoundation/CFNumber.h");
     @cInclude("macos_tap_shim.h");
 });
 
@@ -63,7 +69,7 @@ pub fn listSources(allocator: std.mem.Allocator) ![]DeviceInfo {
     const device_ids = try allocator.alloc(c.AudioObjectID, count);
     defer allocator.free(device_ids);
 
-    if (c.AudioObjectGetPropertyData(c.kAudioObjectSystemObject, &devices_addr, 0, null, &data_size, device_ids.ptr) != 0) {
+    if (c.AudioObjectGetPropertyData(c.kAudioObjectSystemObject, &devices_addr, 0, null, &data_size, @ptrCast(device_ids.ptr)) != 0) {
         return list.toOwnedSlice(allocator);
     }
 
@@ -101,7 +107,7 @@ fn getStringProperty(allocator: std.mem.Allocator, object_id: c.AudioObjectID, s
     };
     var cf_string: c.CFStringRef = null;
     var size: c.UInt32 = @sizeOf(c.CFStringRef);
-    if (c.AudioObjectGetPropertyData(object_id, &addr, 0, null, &size, &cf_string) != 0 or cf_string == null) {
+    if (c.AudioObjectGetPropertyData(object_id, &addr, 0, null, &size, @ptrCast(&cf_string)) != 0 or cf_string == null) {
         return null;
     }
     defer c.CFRelease(cf_string);
@@ -136,10 +142,16 @@ fn deviceIdForUID(uid: [:0]const u8) !c.AudioObjectID {
         .mElement = c.kAudioObjectPropertyElementMain,
     };
     var size: c.UInt32 = @sizeOf(c.AudioValueTranslation);
-    if (c.AudioObjectGetPropertyData(c.kAudioObjectSystemObject, &addr, 0, null, &size, &translation) != 0 or device_id == c.kAudioObjectUnknown) {
+    if (c.AudioObjectGetPropertyData(c.kAudioObjectSystemObject, &addr, 0, null, &size, @ptrCast(&translation)) != 0 or device_id == c.kAudioObjectUnknown) {
         return error.CoreAudioDeviceNotFound;
     }
     return device_id;
+}
+
+/// Caller owns the result and must CFRelease it.
+fn cfString(literal: [*:0]const u8) !c.CFStringRef {
+    return c.CFStringCreateWithCString(null, literal, c.kCFStringEncodingUTF8) orelse
+        error.CoreAudioCFStringFailed;
 }
 
 /// Wraps a process tap in a private aggregate device -- Core Audio only
@@ -158,12 +170,19 @@ fn createAggregateDeviceForTap(allocator: std.mem.Allocator, tap_id: c.AudioObje
     const cf_device_name = c.CFStringCreateWithCString(null, "PragmaticAudio Tap", c.kCFStringEncodingUTF8) orelse return error.CoreAudioCFStringFailed;
     defer c.CFRelease(cf_device_name);
 
-    const sub_tap_keys = [_]c.CFStringRef{ c.kAudioSubTapUIDKey, c.kAudioSubTapDriftCompensationKey };
+    // The aggregate-device dictionary keys are plain C string literals in
+    // <CoreAudio/AudioHardware.h>, but CFDictionaryCreate wants CFStrings.
+    const k_sub_tap_uid = try cfString(c.kAudioSubTapUIDKey);
+    defer c.CFRelease(k_sub_tap_uid);
+    const k_sub_tap_drift = try cfString(c.kAudioSubTapDriftCompensationKey);
+    defer c.CFRelease(k_sub_tap_drift);
+
+    const sub_tap_keys = [_]c.CFStringRef{ k_sub_tap_uid, k_sub_tap_drift };
     const sub_tap_values = [_]?*const anyopaque{ cf_tap_uid, c.kCFBooleanTrue };
     const sub_tap_dict = c.CFDictionaryCreate(
         null,
-        @ptrCast(&sub_tap_keys),
-        @ptrCast(&sub_tap_values),
+        @constCast(@ptrCast(&sub_tap_keys)),
+        @constCast(@ptrCast(&sub_tap_values)),
         sub_tap_keys.len,
         &c.kCFTypeDictionaryKeyCallBacks,
         &c.kCFTypeDictionaryValueCallBacks,
@@ -171,23 +190,34 @@ fn createAggregateDeviceForTap(allocator: std.mem.Allocator, tap_id: c.AudioObje
     defer c.CFRelease(sub_tap_dict);
 
     const tap_list_values = [_]?*const anyopaque{sub_tap_dict};
-    const tap_list = c.CFArrayCreate(null, @ptrCast(&tap_list_values), 1, &c.kCFTypeArrayCallBacks) orelse return error.CoreAudioCFArrayFailed;
+    const tap_list = c.CFArrayCreate(null, @constCast(@ptrCast(&tap_list_values)), 1, &c.kCFTypeArrayCallBacks) orelse return error.CoreAudioCFArrayFailed;
     defer c.CFRelease(tap_list);
 
+    const k_name = try cfString(c.kAudioAggregateDeviceNameKey);
+    defer c.CFRelease(k_name);
+    const k_uid = try cfString(c.kAudioAggregateDeviceUIDKey);
+    defer c.CFRelease(k_uid);
+    const k_private = try cfString(c.kAudioAggregateDeviceIsPrivateKey);
+    defer c.CFRelease(k_private);
+    const k_tap_auto_start = try cfString(c.kAudioAggregateDeviceTapAutoStartKey);
+    defer c.CFRelease(k_tap_auto_start);
+    const k_tap_list = try cfString(c.kAudioAggregateDeviceTapListKey);
+    defer c.CFRelease(k_tap_list);
+
     const top_keys = [_]c.CFStringRef{
-        c.kAudioAggregateDeviceNameKey,
-        c.kAudioAggregateDeviceUIDKey,
-        c.kAudioAggregateDeviceIsPrivateKey,
-        c.kAudioAggregateDeviceTapAutoStartKey,
-        c.kAudioAggregateDeviceTapListKey,
+        k_name,
+        k_uid,
+        k_private,
+        k_tap_auto_start,
+        k_tap_list,
     };
     const top_values = [_]?*const anyopaque{
         cf_device_name, cf_device_uid, c.kCFBooleanTrue, c.kCFBooleanTrue, tap_list,
     };
     const description_dict = c.CFDictionaryCreate(
         null,
-        @ptrCast(&top_keys),
-        @ptrCast(&top_values),
+        @constCast(@ptrCast(&top_keys)),
+        @constCast(@ptrCast(&top_values)),
         top_keys.len,
         &c.kCFTypeDictionaryKeyCallBacks,
         &c.kCFTypeDictionaryValueCallBacks,
@@ -295,13 +325,15 @@ fn ioProc(
     const self: *Capture = @ptrCast(@alignCast(in_client_data.?));
     const cb = self.on_chunk orelse return 0;
     const buffer_list = in_input_data orelse return 0;
-    if (buffer_list.*.mNumberBuffers == 0) return 0;
+    if (buffer_list[0].mNumberBuffers == 0) return 0;
 
     // Assumes the tap/device negotiated interleaved stereo Float32, Core
     // Audio's usual canonical format for a stereo mixdown -- worth
     // double-checking against the stream format actually negotiated if
     // this comes out garbled or at the wrong pitch/speed.
-    const buf = buffer_list.*.mBuffers[0];
+    // Indexed rather than `buffer_list.*.mBuffers[0]`: on a [*c] pointer the
+    // latter form mis-types as [1]AudioBuffer under Zig 0.16.
+    const buf = buffer_list[0].mBuffers[0];
     const frame_count = buf.mDataByteSize / @sizeOf(Frame);
     const data: [*]Frame = @ptrCast(@alignCast(buf.mData));
     cb(self.on_chunk_ctx, data[0..frame_count]);
