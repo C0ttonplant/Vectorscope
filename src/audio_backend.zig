@@ -23,11 +23,12 @@
 //       pub fn deinit(self: *Capture) void;
 //   };
 //
-// `Capture.init` spawns a background thread that reads audio continuously
-// and calls `on_chunk` once per chunk (small and frequent -- see scope.zig's
-// use of it -- rather than buffered for a render tick) until `deinit` stops
-// and joins that thread. All of this must be safe to call from any thread;
-// `on_chunk` runs on the backend's own capture thread.
+// `Capture.init` starts audio flowing continuously -- on a thread the
+// backend spawns itself, or one the OS drives (e.g. an OS-owned real-time
+// I/O callback) -- and calls `on_chunk` once per chunk (small and frequent,
+// see scope.zig's use of it, rather than buffered for a render tick) until
+// `deinit` stops it. `on_chunk` runs on whatever thread the backend uses
+// for capture, never the caller's.
 const builtin = @import("builtin");
 
 const impl = switch (builtin.os.tag) {

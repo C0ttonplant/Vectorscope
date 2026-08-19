@@ -22,13 +22,24 @@ pub fn build(b: *std.Build) !void {
 
     exe.root_module.link_libc = true;
 
-    // Only the Linux backend (src/audio_backend_linux.zig) needs PulseAudio;
-    // macOS/Windows builds compile a stub backend instead (see
-    // src/audio_backend.zig) and don't need anything linked for it yet.
+    // Each OS gets its own audio-capture backend (see src/audio_backend.zig).
     switch (target.result.os.tag) {
         .linux => {
             exe.root_module.linkSystemLibrary("pulse", .{});
             exe.root_module.linkSystemLibrary("pulse-simple", .{});
+        },
+        .macos => {
+            // CATapDescription (Core Audio Process Taps) has no plain-C
+            // constructor, so audio_backend_macos.zig calls into a tiny
+            // Objective-C shim for that one piece.
+            exe.root_module.addIncludePath(b.path("src"));
+            exe.root_module.addCSourceFile(.{
+                .file = b.path("src/macos_tap_shim.m"),
+                .flags = &.{"-fobjc-arc"},
+            });
+            exe.root_module.linkFramework("CoreAudio", .{});
+            exe.root_module.linkFramework("CoreFoundation", .{});
+            exe.root_module.linkFramework("Foundation", .{});
         },
         else => {},
     }
