@@ -10,6 +10,7 @@
 // Objective-C class was documented/public from 14.4).
 #import "macos_tap_shim.h"
 #import <CoreAudio/CATapDescription.h>
+#import <CoreAudio/AudioHardwareTapping.h>
 
 AudioObjectID pa_create_system_tap(void) {
     @autoreleasepool {
@@ -17,7 +18,7 @@ AudioObjectID pa_create_system_tap(void) {
         CATapDescription *description =
             [[CATapDescription alloc] initStereoGlobalTapButExcludeProcesses:@[]];
         description.name = @"PragmaticAudio System Tap";
-        description.muted = NO;
+        description.muteBehavior = CATapUnmuted;
         description.mixdown = YES;
         description.privateTap = YES;
 
