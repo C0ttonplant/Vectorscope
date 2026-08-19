@@ -49,7 +49,14 @@ pub fn main(initt: std.process.Init) anyerror!void {
         rl.updateTexture(texture, texture_pixels.ptr);
 
         if (rl.isKeyPressed(.h)) hud_visible = !hud_visible;
-        if (rl.isKeyPressed(.b)) rl.toggleBorderlessWindowed();
+        if (rl.isKeyPressed(.b)) {
+            if (rl.isWindowState(.{ .window_undecorated = true })) {
+                rl.clearWindowState(.{ .window_undecorated = true });
+            } else {
+                rl.setWindowState(.{ .window_undecorated = true });
+            }
+        }
+        if (rl.isKeyPressed(.f11)) rl.toggleBorderlessWindowed();
 
         // The scope is always square: the largest square that fits the
         // current (resizable) window, centered on the other axis.
